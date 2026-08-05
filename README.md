@@ -160,7 +160,94 @@ Use `SIMPLES_DENTAL_MAX_PATIENTS=3` no `.env` para processar só os 3 primeiros 
 
 `SyncPatientsUseCase` captura o erro de cada paciente individualmente — se um falhar (ficha não abre, campo não encontrado, etc.), o erro é logado (`logs/error.log`) e a sincronização **continua para o próximo paciente**, nunca aborta o processo inteiro.
 
-## Sprint 03 — Sincronização com Supabase
+## Enviando os dados para o Lovable (caminho recomendado)
+
+Depois da dificuldade em migrar/conectar um Supabase externo, o caminho mais simples é **não migrar nada** — o robô envia os dados via HTTP para uma *Edge Function* criada dentro do próprio projeto Lovable, que já tem acesso interno ao banco gerenciado (Lovable Cloud).
+
+### Como configurar
+
+1. No chat do projeto Lovable, peça para criar a Edge Function `sync-patients` (veja o prompt pronto mais abaixo).
+2. O Lovable vai te dar a **URL** da function e o valor do secret `SYNC_API_KEY`.
+3. No `.env`:
+   ```env
+   ENABLE_LOVABLE_HTTP_SYNC=true
+   LOVABLE_SYNC_URL=https://SEU_PROJETO.supabase.co/functions/v1/sync-patients
+   LOVABLE_SYNC_API_KEY=o_valor_que_o_lovable_gerou
+   ```
+4. Rode `npm run dev` normalmente — no final, o robô faz um `POST` com todos os pacientes lidos para essa URL.
+
+### Prompt para colar no chat do Lovable
+
+```
+Preciso criar um endpoint HTTP (Edge Function) para receber dados de sincronização
+de pacientes vindos de um robô externo que faz login no Simples Dental e lê os dados.
+
+Requisitos:
+
+1. Crie uma Edge Function chamada "sync-patients" (POST).
+
+2. Proteja o endpoint exigindo um header "x-api-key" que deve bater com um secret
+   chamado SYNC_API_KEY (crie esse secret em Cloud > Secrets com um valor aleatório
+   e seguro, e me mostre o valor gerado).
+
+3. O corpo da requisição (JSON) é um array de pacientes neste formato:
+
+[
+  {
+    "paciente": {
+      "nome": "string",
+      "cpf": "string",
+      "dataNascimento": "string",
+      "telefone": "string",
+      "email": "string",
+      "tratamentosAtivos": ["string"],
+      "procedimentos": ["string"],
+      "observacoes": "string"
+    },
+    "tratamentos": ["string"],
+    "evolucoes": [
+      {
+        "data": "string",
+        "hora": "string",
+        "profissional": "string",
+        "procedimento": "string",
+        "texto": "string",
+        "possuiAnexo": true
+      }
+    ]
+  }
+]
+
+4. Para cada paciente do array, grave/atualize os dados nas tabelas que já existem
+   no nosso banco (patient_sync_history, clinical_evolutions, integration_records,
+   ou as que fizerem mais sentido no schema atual), fazendo upsert por CPF para não
+   duplicar pacientes em execuções futuras.
+
+5. Retorne um JSON de resposta: { "sucesso": <numero>, "falhas": <numero> }.
+
+6. Se o header x-api-key não bater com o secret, retorne 401.
+
+Depois de criar, me mostre a URL pública dessa Edge Function.
+```
+
+### Novo arquivo
+
+```
+src/infrastructure/http/HttpSyncRepository.ts   # implementa ISyncRepository via HTTP/fetch
+```
+
+### Por que isso é melhor que a Sprint 03 original
+
+| | HTTP → Edge Function (recomendado) | Supabase direto (Sprint 03) |
+|---|---|---|
+| Precisa migrar o backend do Lovable? | Não | Sim |
+| Expõe `service_role key` no robô? | Não | Sim |
+| Depende de estrutura de tabelas já existente | O Lovable mapeia sozinho | Você precisa criar/adaptar `schema.sql` |
+| Complexidade de configuração | Baixa (URL + 1 chave) | Alta (migração de conta/projeto) |
+
+O código de `SupabaseSyncRepository` continua no projeto, funcional, para quem futuramente conectar um Supabase próprio — mas **não é mais o caminho padrão**.
+
+## Sprint 03 (alternativa) — Sincronização direta com Supabase
 
 Com `ENABLE_SUPABASE_SYNC=true` no `.env`, depois de ler todos os pacientes o robô também **grava** os dados no Supabase. Com `false` (padrão), ele continua se comportando como na Sprint 02: só lê e mostra o JSON no console.
 
