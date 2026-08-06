@@ -1,0 +1,54 @@
+name: Login Simples Dental (diário)
+
+on:
+  schedule:
+    # 11:00 UTC = 08:00 horário de Brasília (UTC-3, sem horário de verão)
+    - cron: '0 11 * * *'
+  workflow_dispatch: {} # permite rodar manualmente pelo botão "Run workflow" no GitHub
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Instalar navegador do Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Criar .env a partir dos Secrets
+        run: |
+          echo "SIMPLES_DENTAL_LOGIN_URL=${{ vars.SIMPLES_DENTAL_LOGIN_URL || 'https://app.simplesdental.com/' }}" >> .env
+          echo "SIMPLES_DENTAL_USERNAME=${{ secrets.SIMPLES_DENTAL_USERNAME }}" >> .env
+          echo "SIMPLES_DENTAL_PASSWORD=${{ secrets.SIMPLES_DENTAL_PASSWORD }}" >> .env
+          echo "BROWSER_HEADLESS=true" >> .env
+          echo "BROWSER_TYPE=chromium" >> .env
+          echo "LOG_LEVEL=info" >> .env
+          echo "SIMPLES_DENTAL_MAX_PATIENTS=${{ vars.SIMPLES_DENTAL_MAX_PATIENTS || '1' }}" >> .env
+          echo "ENABLE_LOVABLE_HTTP_SYNC=${{ vars.ENABLE_LOVABLE_HTTP_SYNC || 'true' }}" >> .env
+          echo "LOVABLE_SYNC_URL=${{ vars.LOVABLE_SYNC_URL }}" >> .env
+          echo "LOVABLE_SYNC_API_KEY=${{ secrets.LOVABLE_SYNC_API_KEY }}" >> .env
+          echo "ENABLE_SUPABASE_SYNC=false" >> .env
+
+      - name: Rodar login
+        run: npm run dev
+
+      - name: Publicar logs como artefato (mesmo se falhar)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-login-${{ github.run_id }}
+          path: logs/
+          retention-days: 14 
+        
