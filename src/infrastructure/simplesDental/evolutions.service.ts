@@ -1,8 +1,7 @@
-import { Page, Locator } from 'playwright';
+import { Page } from 'playwright';
 import { EvolutionEntry } from '../../domain/entities/EvolutionEntry';
 import { PATIENTS_SELECTORS } from './patients.selectors';
-import { locateFirst, resolveSelector } from '../../shared/utils/playwrightHelpers';
-import { cleanText } from '../../shared/utils/text';
+import { locateFirst } from '../../shared/utils/playwrightHelpers';
 import { logger } from '../logging/Logger';
 import { env } from '../../config/env';
 
@@ -11,12 +10,25 @@ import { env } from '../../config/env';
  * evolucoes clinicas e ler todas as entradas. (Passo 3 da Sprint 02.)
  *
  * CONFIRMADO em 06/08/2026: nesta conta, "Evoluções" NÃO é uma aba
- * separada — é um painel dentro da aba "Tratamentos" (ao lado do
- * formulário "Adicionar tratamento"). Quando o paciente não tem nenhuma
- * evolução, o painel mostra o texto "O paciente não possui evoluções".
+ * separada — é um painel dentro da aba "Tratamentos". Cada evolução
+ * aparece como: uma linha de DATA por extenso (ex: "19 de junho de
+ * 2026"), seguida de um texto livre (o procedimento/nota) e depois o
+ * profissional no formato "Dr(a). Nome Completo".
  *
- * Nao realiza download de anexos — apenas registra se existem.
+ * Nao ha campo de HORA visivel nesta tela — fica sempre undefined.
+ * Nao realiza download de anexos — apenas registra se existem (quando
+ * for possivel identificar visualmente).
  */
+const MESES = [
+  'janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho',
+  'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro',
+];
+// Data por extenso SEM abreviação (ex: "19 de junho de 2026"), para não
+// confundir com a data de nascimento que usa mês abreviado com ponto
+// (ex: "18 de fev. de 1962", já lida em PatientDetailsService).
+const DATE_LINE_REGEX = new RegExp(`^\\d{1,2} de (${MESES.join('|')}) de \\d{4}$`, 'i');
+const PROFESSIONAL_LINE_REGEX = /^Dr\.?\(?a?\)?\.?\s+/i;
+
 export class EvolutionsService {
   async read(page: Page): Promise<EvolutionEntry[]> {
     try {
@@ -52,9 +64,6 @@ export class EvolutionsService {
       return [];
     }
 
-    // Tenta fechar o popup DE NOVO bem antes do clique — em ambientes mais
-    // lentos (ex: GitHub Actions), o popup pode aparecer alguns segundos
-    // depois do que esperamos no primeiro dismissPromoModalIfPresent().
     await page.waitForTimeout(1000);
     await this.dismissPromoModalIfPresent(page);
 
@@ -64,8 +73,6 @@ export class EvolutionsService {
       logger.warn('Clique normal na aba "Tratamentos" travou (provável overlay). Tentando clique forçado...', {
         error: clickError,
       });
-      // Clique forcado ignora a checagem de "elemento coberto por outra
-      // coisa" — util quando um popup/overlay intercepta o clique normal.
       await tratamentosTab.click({ force: true, timeout: 5000 }).catch((forceError) => {
         logger.warn('Clique forçado na aba "Tratamentos" também falhou.', { error: forceError });
       });
@@ -74,9 +81,6 @@ export class EvolutionsService {
     await page.waitForTimeout(500);
     await this.dismissPromoModalIfPresent(page);
 
-    // Salva sempre um screenshot + dump de texto deste painel, mesmo
-    // quando vazio — útil para calibrar os seletores de entrada assim
-    // que processarmos um paciente que realmente tenha evoluções.
     await this.saveExplorationArtifacts(page, 'painel-tratamentos-evolucoes');
 
     const emptyStateVisible = await page
@@ -90,40 +94,58 @@ export class EvolutionsService {
       return [];
     }
 
-    // Ainda nao calibramos o seletor de "entrada de evolucao" real (so
-    // vimos o painel vazio ate agora). Tenta os candidatos genericos; se
-    // nao bater, loga um aviso claro e retorna vazio sem derrubar o resto.
-    const resolvedEntrySelector = await resolveSelector(page, PATIENTS_SELECTORS.evolutionEntries, 4000);
-    if (!resolvedEntrySelector) {
-      logger.warn(
-        'Painel de Evoluções não está vazio, mas nenhum seletor de entrada bateu. ' +
-          'Ajuste PATIENTS_SELECTORS.evolutionEntries com base no screenshot salvo.',
-      );
-      return [];
-    }
+    const rawText = await page.locator('body').innerText().catch(() => '');
+    const lines = rawText
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
 
-    const entries = page.locator(resolvedEntrySelector);
-    const count = await entries.count().catch(() => 0);
+    const results = this.parseEvolutionsFromLines(lines);
+    logger.info(`${results.length} evolução(ões) extraída(s) via parser de texto.`);
+    return results;
+  }
 
+  /**
+   * Percorre as linhas de texto da pagina procurando o padrão:
+   * "DD de mês de AAAA" (data) -> texto livre (1+ linhas) -> "Dr(a). Nome"
+   * (profissional). Cada ocorrência desse padrão vira uma EvolutionEntry.
+   */
+  private parseEvolutionsFromLines(lines: string[]): EvolutionEntry[] {
     const results: EvolutionEntry[] = [];
-    for (let i = 0; i < count; i++) {
-      const entry = entries.nth(i);
 
-      const data = await this.firstMatchingText(entry, PATIENTS_SELECTORS.evolutionDate);
-      const hora = await this.firstMatchingText(entry, PATIENTS_SELECTORS.evolutionTime);
-      const profissional = await this.firstMatchingText(entry, PATIENTS_SELECTORS.evolutionProfessional);
-      const procedimento = await this.firstMatchingText(entry, PATIENTS_SELECTORS.evolutionProcedure);
-      const texto = await this.firstMatchingText(entry, PATIENTS_SELECTORS.evolutionText);
-      const possuiAnexo = await this.anyMatchVisible(entry, PATIENTS_SELECTORS.evolutionAttachmentIndicator);
+    for (let i = 0; i < lines.length; i++) {
+      if (!DATE_LINE_REGEX.test(lines[i])) continue;
+      const data = lines[i];
 
-      results.push({
-        data: data || undefined,
-        hora: hora || undefined,
-        profissional: profissional || undefined,
-        procedimento: procedimento || undefined,
-        texto: texto || undefined,
-        possuiAnexo,
-      });
+      const textoLinhas: string[] = [];
+      let profissional: string | undefined;
+      let j = i + 1;
+
+      for (; j < lines.length && j < i + 10; j++) {
+        const line = lines[j];
+        if (DATE_LINE_REGEX.test(line)) break;
+        if (line.toLowerCase() === 'sem assinatura') continue;
+        if (PROFESSIONAL_LINE_REGEX.test(line)) {
+          profissional = line.replace(PROFESSIONAL_LINE_REGEX, '').trim();
+          j++;
+          break;
+        }
+        textoLinhas.push(line);
+      }
+
+      const texto = textoLinhas.join(' ').trim();
+      if (texto || profissional) {
+        results.push({
+          data,
+          hora: undefined,
+          profissional: profissional || undefined,
+          procedimento: undefined,
+          texto: texto || undefined,
+          possuiAnexo: false,
+        });
+      }
+
+      i = j - 1;
     }
 
     return results;
@@ -161,31 +183,5 @@ export class EvolutionsService {
     } catch (error) {
       logger.warn(`Não foi possível salvar diagnóstico "${label}".`, { error });
     }
-  }
-
-  /** Tenta cada seletor candidato dentro do escopo (uma evolucao) e retorna o primeiro texto nao-vazio. */
-  private async firstMatchingText(scope: Locator, selectors: string[]): Promise<string> {
-    for (const selector of selectors) {
-      try {
-        const text = cleanText(await scope.locator(selector).first().textContent({ timeout: 1000 }));
-        if (text) return text;
-      } catch {
-        // tenta o proximo seletor
-      }
-    }
-    return '';
-  }
-
-  /** Tenta cada seletor candidato e retorna true se algum estiver visivel dentro do escopo. */
-  private async anyMatchVisible(scope: Locator, selectors: string[]): Promise<boolean> {
-    for (const selector of selectors) {
-      try {
-        const visible = await scope.locator(selector).first().isVisible({ timeout: 500 });
-        if (visible) return true;
-      } catch {
-        // tenta o proximo seletor
-      }
-    }
-    return false;
   }
 }
