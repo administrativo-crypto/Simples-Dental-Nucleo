@@ -19,6 +19,18 @@ import { env } from '../../config/env';
  */
 export class EvolutionsService {
   async read(page: Page): Promise<EvolutionEntry[]> {
+    try {
+      return await this.readInternal(page);
+    } catch (error) {
+      // Falha na leitura de evolucoes NUNCA deve derrubar o paciente
+      // inteiro — os dados da ficha (nome, CPF, etc.) ja foram lidos e
+      // devem ser salvos mesmo que as evolucoes nao tenham sido lidas.
+      logger.warn('Falha ao ler evoluções — paciente será salvo sem evoluções.', { error });
+      return [];
+    }
+  }
+
+  private async readInternal(page: Page): Promise<EvolutionEntry[]> {
     await this.dismissPromoModalIfPresent(page);
 
     const tratamentosTab = await locateFirst(
@@ -40,7 +52,24 @@ export class EvolutionsService {
       return [];
     }
 
-    await tratamentosTab.click();
+    // Tenta fechar o popup DE NOVO bem antes do clique — em ambientes mais
+    // lentos (ex: GitHub Actions), o popup pode aparecer alguns segundos
+    // depois do que esperamos no primeiro dismissPromoModalIfPresent().
+    await page.waitForTimeout(1000);
+    await this.dismissPromoModalIfPresent(page);
+
+    try {
+      await tratamentosTab.click({ timeout: 10000 });
+    } catch (clickError) {
+      logger.warn('Clique normal na aba "Tratamentos" travou (provável overlay). Tentando clique forçado...', {
+        error: clickError,
+      });
+      // Clique forcado ignora a checagem de "elemento coberto por outra
+      // coisa" — util quando um popup/overlay intercepta o clique normal.
+      await tratamentosTab.click({ force: true, timeout: 5000 }).catch((forceError) => {
+        logger.warn('Clique forçado na aba "Tratamentos" também falhou.', { error: forceError });
+      });
+    }
     await page.waitForLoadState('networkidle').catch(() => undefined);
     await page.waitForTimeout(500);
     await this.dismissPromoModalIfPresent(page);
